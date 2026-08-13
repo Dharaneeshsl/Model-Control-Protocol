@@ -18,19 +18,30 @@ class APIClient:
     Handles retries, timeouts, and logging.
     """
     def __init__(self):
-        self.base_url = settings.api_base_url.rstrip("/")
-        headers = {"Content-Type": "application/json"}
-        if settings.api_auth_token:
-            headers["Authorization"] = f"Bearer {settings.api_auth_token}"
+        self._client: Optional[httpx.AsyncClient] = None
 
-        self.client = httpx.AsyncClient(
-            base_url=self.base_url,
-            headers=headers,
-            timeout=httpx.Timeout(10.0, connect=5.0) # 10s general timeout, 5s connect timeout
-        )
+    @property
+    def client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            base_url = settings.api_base_url.rstrip("/")
+            headers = {"Content-Type": "application/json"}
+            if settings.api_auth_token:
+                headers["Authorization"] = f"Bearer {settings.api_auth_token}"
+
+            self._client = httpx.AsyncClient(
+                base_url=base_url,
+                headers=headers,
+                timeout=httpx.Timeout(10.0, connect=5.0)
+            )
+        return self._client
+
+    @client.setter
+    def client(self, client_instance: httpx.AsyncClient):
+        self._client = client_instance
 
     async def close(self):
-        await self.client.aclose()
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
 
     async def _request(self, method: str, path: str, **kwargs) -> Dict[str, Any]:
         """
@@ -102,6 +113,9 @@ class APIClient:
 
     async def put(self, path: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return await self._request("PUT", path, json=json)
+
+    async def patch(self, path: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return await self._request("PATCH", path, json=json)
 
     async def delete(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return await self._request("DELETE", path, params=params)

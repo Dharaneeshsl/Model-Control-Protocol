@@ -10,9 +10,6 @@ def mock_httpx_client():
         client_instance = MagicMock()
         mock_client.return_value = client_instance
 
-        # We also need to patch __aenter__ and __aexit__ if using context managers,
-        # but here we mock the request method directly.
-
         async def mock_aclose():
             pass
         client_instance.aclose = mock_aclose
@@ -31,10 +28,34 @@ async def test_get_success(mock_httpx_client):
     mock_httpx_client.request = mock_request
 
     client = APIClient()
-    client.client = mock_httpx_client # inject the mock directly
+    client.client = mock_httpx_client
 
     result = await client.get("/test")
     assert result == {"id": 1, "name": "Test"}
+
+@pytest.mark.asyncio
+async def test_post_patch_put_delete_success(mock_httpx_client):
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Content-Type": "application/json"}
+    mock_response.json.return_value = {"status": "ok"}
+
+    async def mock_request(*args, **kwargs):
+        return mock_response
+    mock_httpx_client.request = mock_request
+
+    client = APIClient()
+    client.client = mock_httpx_client
+
+    post_res = await client.post("/items", json={"name": "item1"})
+    put_res = await client.put("/items/1", json={"name": "updated"})
+    patch_res = await client.patch("/items/1", json={"name": "patched"})
+    delete_res = await client.delete("/items/1")
+
+    assert post_res == {"status": "ok"}
+    assert put_res == {"status": "ok"}
+    assert patch_res == {"status": "ok"}
+    assert delete_res == {"status": "ok"}
 
 @pytest.mark.asyncio
 async def test_400_error_no_retry(mock_httpx_client):
@@ -42,7 +63,6 @@ async def test_400_error_no_retry(mock_httpx_client):
     mock_response.status_code = 400
     mock_response.text = "Bad Request"
 
-    # raise_for_status mock
     def mock_raise():
         raise httpx.HTTPStatusError("400 Bad Request", request=MagicMock(), response=mock_response)
     mock_response.raise_for_status = mock_raise

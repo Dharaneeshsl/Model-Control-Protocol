@@ -1,5 +1,5 @@
 from typing import Literal, Optional
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     """
@@ -19,11 +19,9 @@ class Settings(BaseSettings):
     oauth_issuer: Optional[str] = None
 
     # Target API Authentication (How this server authenticates to the target API)
-    # E.g., placing this in the Authorization header.
     api_auth_token: Optional[str] = None
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 settings = Settings()
+

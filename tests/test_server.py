@@ -1,5 +1,4 @@
 import unittest
-import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -12,17 +11,24 @@ class TestServer(unittest.TestCase):
     def test_health_check(self):
         response = self.client.get("/health")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"status": "ok"})
+        data = response.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertIn("uptime_seconds", data)
+
+    def test_dashboard_endpoint(self):
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/html", response.headers["content-type"])
+        self.assertIn("MCP API Gateway Server", response.text)
+
+    def test_api_info_endpoint(self):
+        response = self.client.get("/api/info")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["server_name"], "MCP API Gateway Server")
+        self.assertEqual(data["status"], "online")
+        self.assertIn("mcp_tools", data)
 
     def test_sse_endpoint_unauthorized(self):
         response = self.client.get("/sse")
-        self.assertEqual(response.status_code, 401) # FastAPI HTTPBearer returns 401 when no token is present
-
-    def test_sse_endpoint_authorized(self):
-        token = settings.mcp_bearer_token
-        headers = {"Authorization": f"Bearer {token}"}
-        # We don't want to actually connect to SSE as it hangs TestClient.
-        # We just test the auth dependency itself, but we already know 401 works when unauthenticated.
-        # So we can just skip or mock if we need, or simply rely on the manual test that showed
-        # it hangs (meaning it reached the SSE endpoint beyond the auth middleware).
-        pass
+        self.assertEqual(response.status_code, 401)

@@ -72,6 +72,24 @@ async def execute_put(
         return f"Error: {str(e)}"
 
 @mcp_server.tool()
+async def execute_patch(
+    path: str = Field(..., description="The API endpoint path to request (e.g., 'tasks/123')."),
+    payload: Dict[str, Any] = Field(..., description="The JSON payload to send in the request body.")
+) -> str:
+    """
+    Executes a mutating PATCH request against the API.
+    Use this to perform partial updates on existing resources.
+    Requires write permissions if scopes are enforced.
+    """
+    logger.info("tool_execute_patch_called", path=path, payload=payload)
+    try:
+        result = await api_client.patch(path, json=payload)
+        return f"Success: {result}"
+    except Exception as e:
+        logger.error("tool_execute_patch_error", path=path, error=str(e))
+        return f"Error: {str(e)}"
+
+@mcp_server.tool()
 async def execute_delete(
     path: str = Field(..., description="The API endpoint path to request (e.g., 'tasks/123')."),
     query_params: Optional[Dict[str, Any]] = Field(None, description="Optional query parameters.")
@@ -88,3 +106,4 @@ async def execute_delete(
     except Exception as e:
         logger.error("tool_execute_delete_error", path=path, error=str(e))
         return f"Error: {str(e)}"
+

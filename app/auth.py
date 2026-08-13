@@ -1,3 +1,4 @@
+from typing import Optional
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -7,21 +8,29 @@ from app.config import settings
 from app.logger import get_logger
 
 logger = get_logger(__name__)
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 class AuthResult(BaseModel):
     user_id: str
     scopes: list[str] = []
 
-async def verify_auth(credentials: HTTPAuthorizationCredentials = Depends(security)) -> AuthResult:
+async def verify_auth(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> AuthResult:
     """
     Verifies the incoming token based on the configured auth type.
     """
-    token = credentials.credentials
     auth_type = settings.mcp_auth_type
 
     if auth_type == "none":
         return AuthResult(user_id="anonymous", scopes=["*"])
+
+    if not credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication credentials were not provided",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token = credentials.credentials
 
     if auth_type == "bearer":
         if not settings.mcp_bearer_token:
