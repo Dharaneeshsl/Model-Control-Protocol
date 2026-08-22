@@ -7,9 +7,10 @@ A production-ready remote Model Context Protocol (MCP) server that exposes a gen
 - **Transport:** SSE (`streamable-http`).
 - **Resilience:** HTTP requests are retried using exponential backoff (via `tenacity`).
 - **Observability:** Structured JSON logging (via `structlog`) ready for OpenTelemetry.
+- **Security:** Bearer/OAuth auth, hardened CORS, bounded in-memory rate limiting, production boot-time safety checks.
 
 ## Generic Tools vs 1:1 Mapping
-Instead of hardcoding a tool for every endpoint in your API, this server exposes *generic* tools (`execute_get`, `execute_post`, `execute_put`, `execute_delete`). This leverages the LLM's reasoning capabilities.
+Instead of hardcoding a tool for every endpoint in your API, this server exposes *generic* tools (`execute_get`, `execute_post`, `execute_put`, `execute_patch`, `execute_delete`). This leverages the LLM's reasoning capabilities.
 To customize this for *your specific API tools*, modify `app/mcp_server.py`. You can explicitly define tools that wrap `api_client.get('/your-specific-endpoint')`.
 
 ## Running Locally
@@ -17,20 +18,45 @@ To customize this for *your specific API tools*, modify `app/mcp_server.py`. You
 1. Install dependencies:
    ```bash
    python -m venv venv
-   source venv/bin/activate
+   source venv/bin/activate  # Windows: venv\Scripts\activate
    pip install -r requirements.txt
    ```
-2. Create a `.env` file (or just rely on defaults):
-   ```ini
-   API_BASE_URL=https://your-api.example.com
-   API_AUTH_TOKEN=your-target-api-token
-   MCP_AUTH_TYPE=bearer
-   MCP_BEARER_TOKEN=secret-token-for-claude
-   ```
+2. Copy `.env.example` to `.env` and fill in your values.
 3. Run the server:
    ```bash
    uvicorn app.main:app --reload
    ```
+
+## Endpoints
+
+| Endpoint   | Purpose                                            | Auth     |
+|------------|----------------------------------------------------|----------|
+| `/`        | Live status dashboard (HTML)                       | Public   |
+| `/health`  | Liveness probe (status, version, uptime)           | Public   |
+| `/ready`   | Readiness probe (target API configuration check)   | Public   |
+| `/api/info`| Server metadata + tool registry                    | Public   |
+| `/sse`     | MCP SSE transport (Claude/agents connect here)     | Required |
+| `/messages`| MCP JSON-RPC message channel                       | Required |
+
+## Production Safety Features
+- **Fail-fast boot:** with `ENVIRONMENT=production`, the server refuses to start unless `MCP_AUTH_TYPE=bearer` and a unique `MCP_BEARER_TOKEN` is set (no default-token accidents).
+- **Hardened CORS:** explicit origins via `CORS_ALLOWED_ORIGINS` (comma-separated). Wildcard mode automatically disables credentials.
+- **Bounded rate limiting:** per-IP sliding window with hard caps on tracked clients (no memory-leak DoS vector), configurable via `RATE_LIMIT_*` vars.
+- **Container healthcheck:** built into the `Dockerfile` (`HEALTHCHECK` hitting `/health`).
+
+## Verify a Deployment (Boot Check)
+
+Run the one-shot live verification — it boots the real server, probes every endpoint (health, readiness, info, dashboard, auth rejection, SSE MCP handshake), then shuts down cleanly:
+
+```bash
+python verify_boot.py
+```
+
+## Running Tests
+
+```bash
+python -m pytest tests/ -v
+```
 
 ## Local Testing with MCP Inspector
 

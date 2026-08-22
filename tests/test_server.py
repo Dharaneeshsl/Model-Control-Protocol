@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.config import settings
 
+
 class TestServer(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
@@ -14,6 +15,15 @@ class TestServer(unittest.TestCase):
         data = response.json()
         self.assertEqual(data["status"], "ok")
         self.assertIn("uptime_seconds", data)
+        self.assertIn("version", data)
+        self.assertIn("environment", data)
+
+    def test_readiness_check(self):
+        response = self.client.get("/ready")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("status", data)
+        self.assertTrue(data["target_api_configured"])
 
     def test_dashboard_endpoint(self):
         response = self.client.get("/")

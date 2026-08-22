@@ -2,6 +2,8 @@ from fastapi import FastAPI, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from contextlib import asynccontextmanager
+from collections import deque
+import httpx
 import time
 
 from app.mcp_server import mcp_server
@@ -13,48 +15,85 @@ from app.config import settings
 setup_logging()
 logger = get_logger(__name__)
 
-# Basic rate limiting in memory
-request_counts = {}
-RATE_LIMIT = 100 # requests per minute
+# Basic rate limiting in memory (bounded to prevent unbounded memory growth)
+request_counts: dict[str, deque] = {}
+RATE_LIMIT = settings.rate_limit_requests
+RATE_WINDOW = settings.rate_limit_window_seconds
+RATE_LIMIT_ENABLED = settings.rate_limit_enabled
+MAX_TRACKED_IPS = 10_000  # hard cap on tracked clients (DoS protection)
+
+
+def _prune_rate_limiter(now: float):
+    """Removes expired entries and evicts stale IPs so memory stays bounded."""
+    if len(request_counts) > MAX_TRACKED_IPS:
+        # Evict IPs with no recent activity
+        stale = [
+            ip
+            for ip, dq in request_counts.items()
+            if not dq or now - dq[-1] >= RATE_WINDOW
+        ]
+        for ip in stale[: len(request_counts) - MAX_TRACKED_IPS]:
+            request_counts.pop(ip, None)
+
+
 START_TIME = time.time()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("server_startup")
+    logger.info(
+        "server_startup",
+        environment=settings.environment,
+        auth_type=settings.mcp_auth_type,
+        api_target=settings.api_base_url,
+    )
     yield
     logger.info("server_shutdown")
     await api_client.close()
+
 
 app = FastAPI(
     title="MCP API Gateway",
     description="Production-ready Remote Model Context Protocol Server",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
+_wildcard_cors = "*" in settings.allowed_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"] if _wildcard_cors else settings.allowed_origins,
+    # Browsers reject credentials + wildcard; only enable credentials for explicit origins.
+    allow_credentials=not _wildcard_cors,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "Mcp-Session-Id"],
 )
+
 
 @app.middleware("http")
 async def rate_limit_and_log_middleware(request: Request, call_next):
     client_ip = request.client.host if request.client else "unknown"
     current_time = time.time()
 
-    if client_ip not in request_counts:
-        request_counts[client_ip] = []
+    if RATE_LIMIT_ENABLED:
+        _prune_rate_limiter(current_time)
 
-    request_counts[client_ip] = [t for t in request_counts[client_ip] if current_time - t < 60]
+        if client_ip not in request_counts:
+            request_counts[client_ip] = deque()
 
-    if len(request_counts[client_ip]) >= RATE_LIMIT:
-        logger.warning("rate_limit_exceeded", ip=client_ip)
-        return Response(content="Rate limit exceeded", status_code=429)
+        window = request_counts[client_ip]
+        while window and current_time - window[0] >= RATE_WINDOW:
+            window.popleft()
 
-    request_counts[client_ip].append(current_time)
+        if len(window) >= RATE_LIMIT:
+            logger.warning("rate_limit_exceeded", ip=client_ip)
+            return Response(
+                content="Rate limit exceeded",
+                status_code=429,
+                headers={"Retry-After": str(RATE_WINDOW)},
+            )
+
+        window.append(current_time)
 
     start_time = time.time()
     response = await call_next(request)
@@ -66,15 +105,20 @@ async def rate_limit_and_log_middleware(request: Request, call_next):
         url=str(request.url.path),
         status_code=response.status_code,
         latency_ms=f"{latency_ms:.2f}",
-        ip=client_ip
+        ip=client_ip,
     )
 
     return response
 
+
 # Get underlying Starlette app from FastMCP
 mcp_asgi_app = mcp_server.http_app(transport="sse")
 
-@app.api_route("/sse", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD", "TRACE"])
+
+@app.api_route(
+    "/sse",
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD", "TRACE"],
+)
 async def sse_handler(request: Request, auth: AuthResult = Depends(verify_auth)):
     """
     The main Server-Sent Events endpoint for MCP initialization.
@@ -82,8 +126,15 @@ async def sse_handler(request: Request, auth: AuthResult = Depends(verify_auth))
     """
     return await mcp_asgi_app(request.scope, request.receive, request._send)
 
-@app.api_route("/messages", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD", "TRACE"])
-@app.api_route("/messages/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD", "TRACE"])
+
+@app.api_route(
+    "/messages",
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD", "TRACE"],
+)
+@app.api_route(
+    "/messages/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD", "TRACE"],
+)
 async def messages_handler(request: Request, auth: AuthResult = Depends(verify_auth)):
     """
     The endpoint for sending JSON-RPC messages to the MCP server.
@@ -91,38 +142,71 @@ async def messages_handler(request: Request, auth: AuthResult = Depends(verify_a
     """
     return await mcp_asgi_app(request.scope, request.receive, request._send)
 
+
+APP_VERSION = "1.0.0"
+
+
 @app.get("/health")
 async def health_check():
     uptime_seconds = int(time.time() - START_TIME)
     return {
         "status": "ok",
+        "version": APP_VERSION,
+        "environment": settings.environment,
         "uptime_seconds": uptime_seconds,
         "api_target": settings.api_base_url,
-        "auth_type": settings.mcp_auth_type
+        "auth_type": settings.mcp_auth_type,
     }
+
+
+@app.get("/ready")
+async def readiness_check():
+    """Readiness probe: verifies the server can reach the target API base URL."""
+    reachable = True
+    try:
+        host = httpx.URL(settings.api_base_url).host
+        reachable = bool(host)
+    except Exception:
+        reachable = False
+    return {
+        "status": "ready" if reachable else "degraded",
+        "target_api_configured": reachable,
+    }
+
 
 @app.get("/api/info")
 async def api_info():
     return {
         "server_name": "MCP API Gateway Server",
-        "version": "1.0.0",
+        "version": APP_VERSION,
         "status": "online",
         "auth_type": settings.mcp_auth_type,
         "target_api_url": settings.api_base_url,
         "endpoints": {
             "health": "/health",
+            "ready": "/ready",
             "sse": "/sse",
             "messages": "/messages",
-            "info": "/api/info"
+            "info": "/api/info",
         },
         "mcp_tools": [
             {"name": "execute_get", "description": "Execute GET request to target API"},
-            {"name": "execute_post", "description": "Execute POST request to target API"},
+            {
+                "name": "execute_post",
+                "description": "Execute POST request to target API",
+            },
             {"name": "execute_put", "description": "Execute PUT request to target API"},
-            {"name": "execute_patch", "description": "Execute PATCH request to target API"},
-            {"name": "execute_delete", "description": "Execute DELETE request to target API"}
-        ]
+            {
+                "name": "execute_patch",
+                "description": "Execute PATCH request to target API",
+            },
+            {
+                "name": "execute_delete",
+                "description": "Execute DELETE request to target API",
+            },
+        ],
     }
+
 
 @app.get("/", response_class=HTMLResponse)
 @app.get("/dashboard", response_class=HTMLResponse)
